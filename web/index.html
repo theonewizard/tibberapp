@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Home Energy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="vendor/chart.js-4.4.6.umd.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/home">Home Energy</a>
+    <label class="home-picker" hidden>
+      <span class="sr-only">Home</span>
+      <select id="home-select"></select>
+    </label>
+  </header>
+  <div id="stale" class="banner" role="status" hidden></div>
+  <main id="view" tabindex="-1" aria-live="polite"></main>
+  <nav class="tabs" aria-label="Screens">
+    <a href="#/home" data-tab="home">Home</a>
+    <a href="#/live" data-tab="live">Live</a>
+    <a href="#/prices" data-tab="prices">Prices</a>
+    <a href="#/analysis" data-tab="analysis">Analysis</a>
+    <a href="#/devices" data-tab="devices">Devices</a>
+    <a href="#/settings" data-tab="settings">Settings</a>
+  </nav>
+</body>
+</html>

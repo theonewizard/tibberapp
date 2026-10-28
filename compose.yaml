@@ -1,0 +1,25 @@
+# Home Energy on TrueNAS (or any Docker host), behind Caddy.
+services:
+  home-energy:
+    build: .
+    image: home-energy:0.1.0
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /data/home-energy.sqlite3
+      BIND: 0.0.0.0:8080
+      # Trust X-Forwarded-For only from the Caddy container/host network.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    ports:
+      # Host address:port to publish on. Keep it on loopback or the LAN that Caddy uses.
+      - "${PUBLISH_ADDR:-127.0.0.1}:${PUBLISH_PORT:-8080}:8080"
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s

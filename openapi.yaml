@@ -1,0 +1,814 @@
+openapi: 3.1.0
+info:
+  title: Home Energy API
+  version: 0.1.0
+  summary: Backend for the Home Energy web app, built on Tibber's official APIs.
+  description: |
+    Read-only view of a Tibber customer's homes, prices, energy and devices.
+
+    * Upstream identifiers never leave the backend; every `id` here is an opaque
+      identifier minted by this service.
+    * Timestamps are RFC 3339 with an offset, in the home's time zone.
+    * Errors are RFC 9457 `application/problem+json`.
+    * Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and
+      `RateLimit-Reset` headers.
+    * Upstream data that could not be refreshed is served from cache with
+      `meta.stale: true` and `meta.staleSince`.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /
+security:
+  - session: []
+tags:
+  - name: homes
+  - name: prices
+  - name: energy
+  - name: devices
+  - name: live
+  - name: session
+  - name: settings
+  - name: ops
+
+paths:
+  /livez:
+    get:
+      tags: [ops]
+      operationId: livez
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness probe (database reachable, configuration valid)
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          $ref: "#/components/responses/Problem"
+
+  /v1/session:
+    get:
+      tags: [session]
+      operationId: getSession
+      summary: Whether the caller is signed in
+      security: []
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionState" }
+        "429": { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [session]
+      operationId: createSession
+      summary: Sign in with the single-user password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "204":
+          description: Signed in; sets the session cookie
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: HttpOnly; Secure; SameSite=Strict session cookie
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [session]
+      operationId: deleteSession
+      summary: Sign out of this app (does not touch Tibber credentials)
+      responses:
+        "204": { description: Signed out }
+        "401": { $ref: "#/components/responses/Problem" }
+
+  /v1/settings:
+    get:
+      tags: [settings]
+      operationId: getSettings
+      summary: Connection status and selectable scopes
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "401": { $ref: "#/components/responses/Problem" }
+
+  /v1/settings/personal-token:
+    put:
+      tags: [settings]
+      operationId: putPersonalToken
+      summary: Store the Tibber GraphQL personal access token (encrypted at rest)
+      description: The token is checked against the GraphQL API before it is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PersonalTokenRequest" }
+      responses:
+        "204": { description: Stored }
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [settings]
+      operationId: deletePersonalToken
+      summary: Delete the stored personal access token
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Problem" }
+
+  /v1/settings/oauth:
+    post:
+      tags: [settings]
+      operationId: startOAuth
+      summary: Start the Data API OAuth flow (Authorization Code + PKCE S256)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OAuthStartRequest" }
+      responses:
+        "200":
+          description: URL to send the browser to
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthStartResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [settings]
+      operationId: disconnectOAuth
+      summary: Disconnect the Data API (deletes the stored access and refresh tokens)
+      responses:
+        "204": { description: Disconnected }
+        "401": { $ref: "#/components/responses/Problem" }
+
+  /oauth/callback:
+    get:
+      tags: [settings]
+      operationId: oauthCallback
+      summary: OAuth redirect URI target
+      parameters:
+        - { name: code, in: query, schema: { type: string, maxLength: 2048 } }
+        - { name: state, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: error, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: error_description, in: query, schema: { type: string, maxLength: 1024 } }
+        - { name: scope, in: query, schema: { type: string, maxLength: 2048 } }
+        - { name: session_state, in: query, schema: { type: string, maxLength: 1024 } }
+        - { name: iss, in: query, schema: { type: string, maxLength: 1024 } }
+      security: []
+      description: |
+        Must match `OAUTH_REDIRECT_URI` and the redirect URI registered at Tibber exactly.
+        Authenticated by the single-use `state` that a signed-in session created. The session
+        cookie is SameSite=Strict and is not sent on this cross-site redirect, so the response is
+        a small page that navigates back to the Settings screen same-site.
+      responses:
+        "200":
+          description: Page that continues to the Settings screen with `oauth=ok` or `oauth=error`
+          content:
+            text/html:
+              schema: { type: string }
+        "422": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes:
+    get:
+      tags: [homes]
+      operationId: listHomes
+      summary: Homes visible through either Tibber API
+      responses:
+        "200":
+          description: Homes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HomeList" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/prices:
+    get:
+      tags: [prices]
+      operationId: getPrices
+      summary: Current, today and tomorrow prices
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+        - name: resolution
+          in: query
+          schema:
+            type: string
+            enum: [quarter_hourly, hourly]
+            default: quarter_hourly
+      responses:
+        "200":
+          description: Prices. `available` is false when the account has no price contract.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Prices" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/prices/cheapest-window:
+    get:
+      tags: [prices]
+      operationId: getCheapestWindow
+      summary: Cheapest contiguous window of the given length among known prices
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+        - name: duration
+          in: query
+          required: true
+          description: Window length in minutes (multiple of 15)
+          schema: { type: integer, minimum: 15, maximum: 1440, multipleOf: 15 }
+        - name: from
+          in: query
+          description: Earliest window start (defaults to now)
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Latest window end (defaults to the end of known prices)
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Window, or `window` null when not enough prices are known
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheapestWindow" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/energy:
+    get:
+      tags: [energy]
+      operationId: getEnergy
+      summary: Consumption or production over a range, with the previous period for comparison
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+        - name: type
+          in: query
+          required: true
+          schema: { type: string, enum: [consumption, production] }
+        - name: resolution
+          in: query
+          required: true
+          schema: { type: string, enum: [hourly, daily, weekly, monthly, annual] }
+        - name: from
+          in: query
+          required: true
+          description: Inclusive start, RFC 3339 with offset
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Exclusive end, RFC 3339 with offset
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Energy buckets, totals and price performance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Energy" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/devices:
+    get:
+      tags: [devices]
+      operationId: listDevices
+      summary: Devices paired to the home (vehicles appear under every home)
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+      responses:
+        "200":
+          description: Devices
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceList" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/devices/{deviceId}:
+    get:
+      tags: [devices]
+      operationId: getDevice
+      summary: Device state, attributes and capabilities
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "200":
+          description: Device
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/devices/{deviceId}/history:
+    get:
+      tags: [devices]
+      operationId: getDeviceHistory
+      summary: One page of device history
+      description: |
+        Start with `resolution` plus `since` (page forward) or `until` (page backward),
+        then follow the opaque `next` / `prev` cursors. A `cursor` cannot be combined
+        with the other query parameters.
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+        - $ref: "#/components/parameters/DeviceId"
+        - name: cursor
+          in: query
+          schema: { type: string, pattern: "^[A-Za-z0-9_-]{16,64}$" }
+        - name: resolution
+          in: query
+          schema: { $ref: "#/components/schemas/HistoryResolution" }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: History page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceHistory" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+
+  /v1/homes/{id}/live:
+    get:
+      tags: [live]
+      operationId: streamLive
+      summary: Server-Sent Events stream of live measurements for the home
+      description: |
+        One upstream stream per home is shared by every browser. Event types:
+        `measurement` (data is a `LiveMeasurement`), `status` (data is a `LiveStatus`)
+        and `ping` (empty, every 20 s).
+      parameters:
+        - $ref: "#/components/parameters/HomeId"
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE frames; see the `LiveMeasurement` and `LiveStatus` schemas.
+              x-sse-events:
+                measurement: { $ref: "#/components/schemas/LiveMeasurement" }
+                status: { $ref: "#/components/schemas/LiveStatus" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: he_session
+      description: HttpOnly, Secure, SameSite=Strict cookie set by `POST /v1/session`.
+
+  parameters:
+    HomeId:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/OpaqueId" }
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/OpaqueId" }
+
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    OpaqueId:
+      type: string
+      description: Identifier minted by this service; not an upstream identifier.
+      pattern: "^[A-Za-z0-9_-]{16,64}$"
+
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string }
+        errors:
+          type: array
+          description: Field-level validation errors (422 only)
+          items:
+            type: object
+            required: [location, message]
+            properties:
+              location: { type: string }
+              message: { type: string }
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+
+    Meta:
+      type: object
+      required: [fetchedAt, stale]
+      description: Freshness of the upstream data behind this response.
+      properties:
+        fetchedAt: { type: string, format: date-time }
+        stale: { type: boolean }
+        staleSince:
+          type: [string, "null"]
+          format: date-time
+          description: First failed refresh since the last successful one
+
+    SessionState:
+      type: object
+      required: [authenticated]
+      properties:
+        authenticated: { type: boolean }
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password: { type: string, minLength: 1, maxLength: 1024 }
+
+    Scope:
+      type: object
+      required: [name, label, required, granted]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        required: { type: boolean, description: Always requested }
+        granted: { type: boolean }
+
+    Settings:
+      type: object
+      required: [dataApiConnected, personalTokenSet, scopes, oauthConfigured]
+      properties:
+        dataApiConnected: { type: boolean }
+        oauthConfigured:
+          type: boolean
+          description: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET and OAUTH_REDIRECT_URI are set
+        personalTokenSet: { type: boolean }
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/Scope" }
+
+    PersonalTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: { type: string, minLength: 20, maxLength: 512, pattern: "^[A-Za-z0-9_.-]+$" }
+
+    OAuthStartRequest:
+      type: object
+      additionalProperties: false
+      required: [scopes]
+      properties:
+        scopes:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          description: Optional category scopes; the baseline scopes are always added.
+          items:
+            type: string
+            enum:
+              - data-api-vehicles-read
+              - data-api-chargers-read
+              - data-api-thermostats-read
+              - data-api-energy-systems-read
+              - data-api-inverters-read
+              - data-api-meters-read
+
+    OAuthStartResponse:
+      type: object
+      required: [authorizeUrl]
+      properties:
+        authorizeUrl: { type: string, format: uri }
+
+    Home:
+      type: object
+      required: [id, name, timeZone, realTimeConsumption, sources]
+      properties:
+        id: { $ref: "#/components/schemas/OpaqueId" }
+        name: { type: string }
+        timeZone: { type: string, description: IANA time zone }
+        realTimeConsumption:
+          type: boolean
+          description: A Pulse or Watty is paired (GraphQL `features.realTimeConsumptionEnabled`)
+        sources:
+          type: object
+          required: [prices, devices]
+          properties:
+            prices: { type: boolean, description: Known to the GraphQL API }
+            devices: { type: boolean, description: Known to the Data API }
+
+    HomeList:
+      type: object
+      required: [homes, meta]
+      properties:
+        homes:
+          type: array
+          items: { $ref: "#/components/schemas/Home" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    PriceLevel:
+      type: [string, "null"]
+      enum: [VERY_CHEAP, CHEAP, NORMAL, EXPENSIVE, VERY_EXPENSIVE, null]
+
+    PricePoint:
+      type: object
+      required: [startsAt, total, energy, tax, level]
+      properties:
+        startsAt: { type: string, format: date-time }
+        total: { type: [number, "null"] }
+        energy: { type: [number, "null"] }
+        tax: { type: [number, "null"] }
+        level: { $ref: "#/components/schemas/PriceLevel" }
+
+    Prices:
+      type: object
+      required: [available, resolution, timeZone, currency, current, today, tomorrow, meta]
+      properties:
+        available:
+          type: boolean
+          description: false when the account has no price contract (no current subscription)
+        resolution: { type: string, enum: [quarter_hourly, hourly] }
+        timeZone: { type: string }
+        currency: { type: [string, "null"] }
+        current:
+          oneOf:
+            - { $ref: "#/components/schemas/PricePoint" }
+            - { type: "null" }
+        today:
+          type: array
+          items: { $ref: "#/components/schemas/PricePoint" }
+        tomorrow:
+          type: array
+          items: { $ref: "#/components/schemas/PricePoint" }
+        tomorrowExpectedAfter:
+          type: [string, "null"]
+          format: date-time
+          description: Set while tomorrow's prices are not yet published
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    CheapestWindow:
+      type: object
+      required: [durationMinutes, window, meta]
+      properties:
+        durationMinutes: { type: integer }
+        window:
+          oneOf:
+            - type: object
+              required: [start, end, averageTotal, currency]
+              properties:
+                start: { type: string, format: date-time }
+                end: { type: string, format: date-time }
+                averageTotal: { type: number }
+                currency: { type: string }
+            - { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    EnergyBucket:
+      type: object
+      required: [from, to, energy, cost, unitPrice]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        energy: { type: [number, "null"], description: kWh }
+        cost:
+          type: [number, "null"]
+          description: Consumption cost, or production profit for production
+        unitPrice: { type: [number, "null"] }
+
+    PricePerformance:
+      type: object
+      description: |
+        Average price paid (Σcost / ΣkWh over hourly data) compared with the plain average
+        hourly price. Negative `percent` means usage was shifted to cheaper hours.
+      required: [averagePaid, averagePrice, percent]
+      properties:
+        averagePaid: { type: number }
+        averagePrice: { type: number }
+        percent: { type: number }
+
+    EnergyTotals:
+      type: object
+      required: [from, to, energy, cost, pricePerformance]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        energy: { type: [number, "null"] }
+        cost: { type: [number, "null"] }
+        pricePerformance:
+          oneOf:
+            - { $ref: "#/components/schemas/PricePerformance" }
+            - { type: "null" }
+
+    Energy:
+      type: object
+      required: [type, resolution, timeZone, currency, unit, buckets, totals, previous, meta]
+      properties:
+        type: { type: string, enum: [consumption, production] }
+        resolution: { type: string, enum: [hourly, daily, weekly, monthly, annual] }
+        timeZone: { type: string }
+        currency: { type: [string, "null"] }
+        unit: { type: string, enum: [kWh] }
+        buckets:
+          type: array
+          items: { $ref: "#/components/schemas/EnergyBucket" }
+        totals: { $ref: "#/components/schemas/EnergyTotals" }
+        previous:
+          $ref: "#/components/schemas/EnergyTotals"
+          description: Same-length period immediately before `from`
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    Capability:
+      type: object
+      required: [id, kind, description, value]
+      description: Rendered generically; unknown kinds are passed through as `unknown`.
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [number, integer, enum, unknown] }
+        description: { type: [string, "null"] }
+        value: { type: [number, string, boolean, "null"] }
+        unit: { type: [string, "null"] }
+        availableValues:
+          type: [array, "null"]
+          items: { type: string }
+
+    Attribute:
+      type: object
+      required: [id, kind, value]
+      description: Wi-Fi SSID/BSSID/IP and external ids are deliberately not exposed.
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [string, boolean, datetime, enum, connectivity, unknown] }
+        description: { type: [string, "null"] }
+        value: { type: [number, string, boolean, "null"] }
+        availableValues:
+          type: [array, "null"]
+          items: { type: string }
+
+    HistoryResolution:
+      type: string
+      enum: [quarterHour, hour, day, month]
+
+    DeviceSummary:
+      type: object
+      required: [id, name, brand, model, historyResolutions]
+      properties:
+        id: { $ref: "#/components/schemas/OpaqueId" }
+        name: { type: string }
+        brand: { type: string }
+        model: { type: [string, "null"] }
+        historyResolutions:
+          type: array
+          items: { $ref: "#/components/schemas/HistoryResolution" }
+
+    DeviceList:
+      type: object
+      required: [available, devices, meta]
+      properties:
+        available:
+          type: boolean
+          description: false when the Data API is not connected
+        devices:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceSummary" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    Device:
+      allOf:
+        - $ref: "#/components/schemas/DeviceSummary"
+        - type: object
+          required: [lastSeen, maxRetentionDays, attributes, capabilities, meta]
+          properties:
+            lastSeen: { type: [string, "null"], format: date-time }
+            maxRetentionDays: { type: [integer, "null"] }
+            attributes:
+              type: array
+              items: { $ref: "#/components/schemas/Attribute" }
+            capabilities:
+              type: array
+              items: { $ref: "#/components/schemas/Capability" }
+            meta: { $ref: "#/components/schemas/Meta" }
+
+    DeviceHistory:
+      type: object
+      required: [resolution, effectiveStart, effectiveEnd, items, next, prev]
+      properties:
+        resolution: { $ref: "#/components/schemas/HistoryResolution" }
+        effectiveStart: { type: [string, "null"], format: date-time }
+        effectiveEnd: { type: [string, "null"], format: date-time }
+        items:
+          type: array
+          items:
+            type: object
+            required: [time, data]
+            properties:
+              time: { type: string, format: date-time }
+              data:
+                type: object
+                description: Unstructured values; keys depend on the device.
+        next:
+          oneOf:
+            - { $ref: "#/components/schemas/OpaqueId" }
+            - { type: "null" }
+        prev:
+          oneOf:
+            - { $ref: "#/components/schemas/OpaqueId" }
+            - { type: "null" }
+
+    LiveMeasurement:
+      type: object
+      description: All fields optional; which ones appear depends on the meter.
+      properties:
+        timestamp: { type: string, format: date-time }
+        power: { type: [number, "null"] }
+        powerProduction: { type: [number, "null"] }
+        minPower: { type: [number, "null"] }
+        averagePower: { type: [number, "null"] }
+        maxPower: { type: [number, "null"] }
+        accumulatedConsumption: { type: [number, "null"] }
+        accumulatedProduction: { type: [number, "null"] }
+        accumulatedConsumptionLastHour: { type: [number, "null"] }
+        accumulatedProductionLastHour: { type: [number, "null"] }
+        accumulatedCost: { type: [number, "null"] }
+        accumulatedReward: { type: [number, "null"] }
+        currency: { type: [string, "null"] }
+        voltageL1: { type: [number, "null"] }
+        voltageL2: { type: [number, "null"] }
+        voltageL3: { type: [number, "null"] }
+        currentL1: { type: [number, "null"] }
+        currentL2: { type: [number, "null"] }
+        currentL3: { type: [number, "null"] }
+        powerFactor: { type: [number, "null"] }
+        signalStrength: { type: [integer, "null"] }
+
+    LiveStatus:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [connecting, connected, reconnecting, unavailable] }
+        source: { type: [string, "null"], enum: [graphql, data-api, null] }
+        retryInSeconds: { type: [number, "null"] }
+        reason: { type: [string, "null"] }

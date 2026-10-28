@@ -1,0 +1,5 @@
+-r requirements.txt
+graphql-core==3.3.1
+pytest==9.2.0
+pyyaml==6.0.3
+ruff==0.17.3

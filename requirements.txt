@@ -1,0 +1,13 @@
+# Runtime dependencies, pinned exactly. Update deliberately and re-run the CVE scan.
+argon2-cffi==25.1.0
+cryptography==50.0.2
+fastapi==0.162.0
+httpx==0.28.1
+opentelemetry-api==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-instrumentation-httpx==0.66b1
+opentelemetry-sdk==1.45.1
+pydantic==2.14.1
+uvicorn==0.54.0
+websockets==17.3

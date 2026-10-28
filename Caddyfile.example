@@ -1,0 +1,11 @@
+# Caddy in front of Home Energy: TLS, plus basic auth as a second gate.
+# Hash the basic-auth password with: caddy hash-password
+energy.example.com {
+	basic_auth {
+		you $2a$14$replace-with-caddy-hash
+	}
+	reverse_proxy 127.0.0.1:8080 {
+		# Server-Sent Events: stream responses immediately.
+		flush_interval -1
+	}
+}
